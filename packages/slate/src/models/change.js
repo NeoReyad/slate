@@ -1,7 +1,7 @@
 import Debug from 'debug'
 import isPlainObject from 'is-plain-object'
 import warning from 'slate-dev-warning'
-import { List, Map } from 'immutable'
+import { List } from 'immutable'
 
 import MODEL_TYPES, { isType } from '../constants/model-types'
 import Changes from '../changes'
@@ -184,41 +184,78 @@ class Change {
     // TODO: if we had an `Operations.tranform` method, we could optimize this
     // to not use keys, and instead used transformed operation paths.
     const table = document.getKeysToPathsTable()
-    let map = Map()
 
-    // TODO: this could be optimized to not need the nested map, and instead use
-    // clever sorting to arrive at the proper depth-first normalizing.
-    keys.forEach(key => {
-      const path = table[key]
-      if (!path) return
-      if (!path.length) return
-      if (!map.hasIn(path)) map = map.setIn(path, Map())
-    })
+    const sortedPaths = keys
+      .reduce(
+        (paths, key) => {
+          const path = table[key]
+          if (!path) return paths
+          if (!path.length) return paths
+
+          const found = paths.find(currentPath => {
+            return currentPath.join(',') === path.join(',')
+          })
+
+          if (!found) {
+            paths.push(path)
+          }
+
+          for (let i = 1; i < path.length; i++) {
+            const parentPath = path.slice(0, -i)
+
+            const parentFound = paths.find(currentPath => {
+              return currentPath.join(',') === parentPath.join(',')
+            })
+
+            if (!parentFound) {
+              paths.push(parentPath)
+            }
+          }
+
+          return paths
+        },
+        [[]]
+      )
+      .sort((pathA, pathB) => {
+        if (pathA.length === 0) {
+          return 1
+        } else if (pathB.length === 0) {
+          return -1
+        }
+
+        const maxLength = Math.max(pathB.length, pathA.length)
+
+        for (let i = 0; i < maxLength; i++) {
+          const pathAElem = pathA[i]
+          const pathBElem = pathB[i]
+
+          if (pathAElem !== pathBElem) {
+            if (
+              typeof pathAElem !== 'number' &&
+              typeof pathBElem === 'number'
+            ) {
+              return 1
+            } else if (
+              typeof pathB[i] !== 'number' &&
+              typeof pathAElem === 'number'
+            ) {
+              return -1
+            } else {
+              return pathA[i] - pathB[i]
+            }
+          }
+        }
+      })
 
     // To avoid infinite loops, we need to defer normalization until the end.
     this.withoutNormalizing(() => {
-      this.normalizeMapAndPath(map)
+      sortedPaths.forEach(path => {
+        const node = document.assertNode(path)
+
+        this.normalizeNode(node)
+      })
     })
 
-    return this
-  }
-
-  /**
-   * Normalize all of the nodes in a normalization `map`, depth-first. An
-   * additional `path` argument specifics the current depth/location.
-   *
-   * @param {Map} map
-   * @param {Array} path (optional)
-   * @return {Change}
-   */
-
-  normalizeMapAndPath(map, path = []) {
-    map.forEach((m, k) => {
-      const p = [...path, k]
-      this.normalizeMapAndPath(m, p)
-    })
-
-    this.normalizePath(path)
     return this
   }
 
@@ -232,8 +269,25 @@ class Change {
 
   normalizePath(path) {
     const { value } = this
+    const { document } = value
+    const node = document.assertNode(path)
+
+    this.normalizeNode(node)
+
+    return this
+  }
+
+  /**
+   * Normalize the node iterating as many times as
+   * necessary until it satisfies all of the schema rules.
+   *
+   * @param {Node} node
+   * @return {Change}
+   */
+
+  normalizeNode(node) {
+    const { value } = this
     let { document, schema } = value
-    let node = document.assertNode(path)
 
     let iterations = 0
     const max =
@@ -242,6 +296,7 @@ class Change {
       (node.object === 'text' ? 1 : node.nodes.size)
 
     const iterate = () => {
+      let path = document.getPath(key)
       const fn = node.normalize(schema)
       if (!fn) return
 
@@ -285,6 +340,7 @@ class Change {
     }
 
     iterate()
+
     return this
   }
 
